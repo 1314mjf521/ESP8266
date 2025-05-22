@@ -67,6 +67,8 @@
  void handleSetClientName(); // 处理设置控制端名称的请求 / Handle set client name request
  void updateClientOnlineStatus(String mac); // 更新控制端在线状态 / Update client online status
  void handleResetWiFi(); // 处理重新配网请求 / Handle reset WiFi request
+ void handleSpeedUp(); // 处理加速请求 / Handle speed up request
+ void handleSlowDown(); // 处理减速请求 / Handle slow down request
  
  // WiFi连接失败计数器 / WiFi connection failure counter
  int wifiConnectFailures = 0;
@@ -116,44 +118,54 @@
  
  // 检查是否定义了引脚宏，如果未定义则手动定义
  #ifndef D1
- #define D1 5 // 替换为实际的 GPIO 编号
+ #define D1 4 // 替换为实际的 GPIO 编号
  #endif
  #ifndef D2
- #define D2 4 // 替换为实际的 GPIO 编号
+ #define D2 5 // 替换为实际的 GPIO 编号
  #endif
  #ifndef D3
- #define D3 0 // 替换为实际的 GPIO 编号
+ #define D3 16 // 替换为实际的 GPIO 编号
  #endif
  #ifndef D4
- #define D4 2 // 替换为实际的 GPIO 编号
+ #define D4 14 // 替换为实际的 GPIO 编号
  #endif
  #ifndef D5
- #define D5 14 // 替换为实际的 GPIO 编号
+ #define D5 12 // 替换为实际的 GPIO 编号
+ #endif
+ #ifndef D6
+ #define D6 13 // 替换为实际的 GPIO 编号闲置引脚暂未使用
  #endif
  
- // 步进电机控制引脚定义 / Stepper motor control pin definitions
- #define DIR_PIN D1  // 方向控制引脚 / Direction control pin
- #define STEP_PIN D2 // 步进控制引脚 / Step control pin
- #define ENABLE_PIN D3 // 使能引脚 / Enable pin
- 
- // 电机开关及限位按钮引脚定义 / Motor toggle and limit switch pin definition
- #define MOTOR_BUTTON_PIN D4 // 电机开关及限位按钮引脚 / Motor toggle and limit switch pin
- 
- // 按钮状态变量 / Button state variables
- bool lastMotorButtonState = HIGH; // 上一次读取的电机按钮状态 / Last read state of the motor button
- unsigned long lastMotorButtonDebounceTime = 0; // 防抖时间戳 / Debounce timestamp
- const unsigned long motorButtonDebounceDelay = 50; // 防抖延迟（毫秒） / Debounce delay (milliseconds)
- 
- // 物理按钮引脚定义 / Physical button pin definitions
- #define BUTTON_DIRECTION_PIN D5 // 电机方向按钮引脚 / Motor direction button pin
- 
- // 按钮状态变量 / Button state variables
- bool lastEnableButtonState = HIGH; // 上一次读取的电机开关按钮状态 / Last read state of the motor on/off button
- bool lastDirectionButtonState = HIGH; // 上一次读取的电机方向按钮状态 / Last read state of the motor direction button
- unsigned long lastDebounceTime = 0; // 防抖时间戳 / Debounce timestamp
- const unsigned long debounceDelay = 50; // 防抖延迟（毫秒） / Debounce delay (milliseconds)
- 
- // MQTT主题定义 / MQTT topic definitions
+// 引脚定义区域 / Pin definitions
+// =============================
+// 步进电机控制引脚定义 / Stepper motor control pin definitions
+#define DIR_PIN D1  // 方向控制引脚 / Direction control pin
+#define STEP_PIN D2 // 步进控制引脚 / Step control pin
+#define ENABLE_PIN D3 // 使能引脚 / Enable pin
+
+// 电机开关及限位按钮引脚定义 / Motor toggle and limit switch pin definition
+#define MOTOR_BUTTON_PIN D4 // 电机开关及限位按钮引脚 / Motor toggle and limit switch pin
+
+// 物理按钮引脚定义 / Physical button pin definitions
+#define BUTTON_DIRECTION_PIN D5 // 电机方向按钮引脚 / Motor direction button pin
+
+// 板载 LED 引脚定义 / Onboard LED pin definition
+#ifndef LED_BUILTIN
+#define LED_BUILTIN 2 // 通常 ESP8266 的板载 LED 位于 GPIO 2 / Typically onboard LED is on GPIO 2
+#endif
+// =============================
+
+// 按钮状态变量 / Button state variables
+bool lastMotorButtonState = HIGH; // 上一次读取的电机按钮状态 / Last read state of the motor button
+unsigned long lastMotorButtonDebounceTime = 0; // 防抖时间戳 / Debounce timestamp
+const unsigned long motorButtonDebounceDelay = 50; // 防抖延迟（毫秒） / Debounce delay (milliseconds)
+
+bool lastEnableButtonState = HIGH; // 上一次读取的电机开关按钮状态 / Last read state of the motor on/off button
+bool lastDirectionButtonState = HIGH; // 上一次读取的电机方向按钮状态 / Last read state of the motor direction button
+unsigned long lastDebounceTime = 0; // 防抖时间戳 / Debounce timestamp
+const unsigned long debounceDelay = 50; // 防抖延迟（毫秒） / Debounce delay (milliseconds)
+
+// MQTT主题定义 / MQTT topic definitions
  const char* mqtt_topic_motor_control = "motor/control"; // 电机控制主题 / Motor control topic
  const char* mqtt_topic_status_report = "motor/status";  // 状态上报主题 / Status report topic
  
@@ -195,15 +207,16 @@
  
  // 定义MQTT重连的时间间隔（毫秒） / Define MQTT reconnect interval (milliseconds)
  const unsigned long mqttReconnectInterval = 5000; // 每5秒尝试一次 / Retry every 5 seconds
- unsigned long lastMQTTReconnectAttempt = 0; // 上次尝试重连的时间戳 / Last reconnect attempt timestamp
+ unsigned long lastMQTTReconnectAttempt = 0; // 上次尝试时间戳 / Last reconnect attempt timestamp
  
  // MQTT控制启用标志 / MQTT control enable flag
- bool mqttControlEnabled = true; // 默认启用MQTT控制 / Default to enabled
+ bool mqttControlEnabled = false; // 默认禁用MQTT控制 / Default to disabled
  
  // MQTT重连函数 / MQTT reconnect function
  void reconnectMQTT() {
    if (!mqttControlEnabled) {
-     return; // 如果禁用MQTT控制，则不进行检测 / Do nothing if MQTT control is disabled
+     Serial.println("MQTT控制已禁用，跳过重连 / MQTT control disabled, skipping reconnect");
+     return;
    }
  
    if (client.connected()) return; // 如果已连接，直接返回 / Return if already connected
@@ -316,6 +329,32 @@
          })
          .catch(() => alert('无法连接到设备 / Unable to connect to the device'));
      }
+
+     // 加速电机 / Speed up motor
+     function speedUpMotor() {
+       fetch('/motor/speed_up')
+         .then(response => {
+           if (response.ok) {
+             alert('电机加速成功！ / Motor speed increased successfully!');
+           } else {
+             alert('加速失败！ / Speed up failed!');
+           }
+         })
+         .catch(() => alert('无法连接到设备 / Unable to connect to the device'));
+     }
+
+     // 减速电机 / Slow down motor
+     function slowDownMotor() {
+       fetch('/motor/slow_down')
+         .then(response => {
+           if (response.ok) {
+             alert('电机减速成功！ / Motor speed decreased successfully!');
+           } else {
+             alert('减速失败！ / Slow down failed!');
+           }
+         })
+         .catch(() => alert('无法连接到设备 / Unable to connect to the device'));
+     }
  
      window.onload = loadDeviceInfo;
    </script>
@@ -334,6 +373,8 @@
      <button onclick="fetch('/motor/on').then(() => alert('电机已开启！')).catch(() => alert('操作失败！'));">开启电机</button>
      <button onclick="fetch('/motor/off').then(() => alert('电机已关闭！')).catch(() => alert('操作失败！'));">关闭电机</button>
      <button onclick="fetch('/motor/direction').then(() => alert('电机方向已切换！')).catch(() => alert('操作失败！'));">切换电机方向</button>
+     <button onclick="speedUpMotor()">加速</button>
+     <button onclick="slowDownMotor()">减速</button>
    </div>
    <div class="button-group">
      <h2>设置电机启动时长</h2>
@@ -381,36 +422,64 @@
      Serial.printf("[%lu] 电机因未使用超时已禁用 / Motor disabled due to inactivity timeout\n", millis());
    }
  }
- 
- // 初始化WiFi连接 / Initialize WiFi connection with fault tolerance
- void initializeWiFi() {
-   WiFiManager wifiManager;
-   wifiManager.setTimeout(180); // 设置智能配网超时时间为180秒 / Set smart configuration timeout to 180 seconds
- 
-   while (wifiConnectFailures < 3) {
-     if (wifiManager.autoConnect("ESP8266_SmartConfig")) { // 设置配网热点名称 / Set WiFi configuration hotspot name
-       Serial.println("WiFi连接成功 / WiFi connected");
-       Serial.print("设备IP地址: / Device IP Address: ");
-       Serial.println(WiFi.localIP());
-       return;
-     } else {
-       wifiConnectFailures++;
-       Serial.printf("WiFi连接失败，第%d次尝试 / WiFi connection failed, attempt %d\n", wifiConnectFailures, wifiConnectFailures);
-       delay(10000); // 每次失败后等待10秒 / Wait 10 seconds after each failure
-     }
-   }
- 
-   // 超过3次失败后重新进入智能配网模式 / Enter smart configuration mode after 3 failures
-   Serial.println("WiFi连接失败超过3次，进入智能配网模式 / WiFi connection failed more than 3 times, entering smart configuration mode");
-   wifiManager.startConfigPortal("ESP8266_SmartConfig");
- }
+
+// LED 状态变量 / LED state variables
+bool ledState = LOW;
+unsigned long lastLedToggleTime = 0;
+const unsigned long ledBlinkInterval = 500; // LED 频闪间隔（毫秒） / LED blink interval (milliseconds)
+
+// 更新 LED 状态的函数 / Function to update LED state
+void updateLEDState() {
+    unsigned long currentMillis = millis();
+
+    // 如果 WiFi 已连接，LED 常亮 / If WiFi is connected, LED stays on
+    if (WiFi.status() == WL_CONNECTED) {
+        digitalWrite(LED_BUILTIN, LOW); // 常亮（低电平点亮） / LED on (active LOW)
+        return;
+    }
+
+    // 如果 WiFi 未连接，LED 频闪 / If WiFi is not connected, LED blinks
+    if (currentMillis - lastLedToggleTime >= ledBlinkInterval) {
+        lastLedToggleTime = currentMillis;
+        ledState = !ledState;
+        digitalWrite(LED_BUILTIN, ledState ? LOW : HIGH); // 切换 LED 状态 / Toggle LED state
+    }
+}
+
+// 初始化WiFi连接 / Initialize WiFi connection with fault tolerance
+void initializeWiFi() {
+    pinMode(LED_BUILTIN, OUTPUT); // 设置板载 LED 为输出模式 / Set onboard LED as output
+    digitalWrite(LED_BUILTIN, HIGH); // 默认关闭 LED（高电平熄灭） / Default LED off (active LOW)
+
+    WiFiManager wifiManager;
+    wifiManager.setTimeout(180); // 设置智能配网超时时间为180秒 / Set smart configuration timeout to 180 seconds
+
+    while (wifiConnectFailures < 3) {
+        if (wifiManager.autoConnect("ESP8266_SmartConfig")) { // 设置配网热点名称 / Set WiFi configuration hotspot name
+            Serial.println("WiFi连接成功 / WiFi connected");
+            Serial.print("设备IP地址: / Device IP Address: ");
+            Serial.println(WiFi.localIP());
+            return;
+        } else {
+            wifiConnectFailures++;
+            Serial.printf("WiFi连接失败，第%d次尝试 / WiFi connection failed, attempt %d\n", wifiConnectFailures, wifiConnectFailures);
+            delay(10000); // 每次失败后等待10秒 / Wait 10 seconds after each failure
+        }
+    }
+
+    // 超过3次失败后重新进入智能配网模式 / Enter smart configuration mode after 3 failures
+    Serial.println("WiFi连接失败超过3次，进入智能配网模式 / WiFi connection failed more than 3 times, entering smart configuration mode");
+    wifiManager.startConfigPortal("ESP8266_SmartConfig");
+}
  
  // 初始化Web服务器 / Initialize web server
  void setupWebServer() {
    server.on("/", handleRoot);
-   server.on("/motor/on", handleMotorOn);
-   server.on("/motor/off", handleMotorOff);
-   server.on("/motor/direction", handleMotorDirection);
+   server.on("/motor/on", handleMotorOn); // 处理开启电机请求 / Handle motor on request
+   server.on("/motor/off", handleMotorOff); //  处理关闭电机请求 / Handle motor off request
+   server.on("/motor/direction", handleMotorDirection); // 处理切换电机方向请求 / Handle motor direction toggle request
+   server.on("/motor/speed_up", handleSpeedUp); // 添加加速接口 / Add speed up endpoint
+   server.on("/motor/slow_down", handleSlowDown); // 添加减速接口 / Add slow down endpoint
    server.on("/api/motor", handleMotorAPI); // 添加API接口处理 / Add API endpoint handling
    server.on("/api/register", handleRegisterController); // 添加注册控制端的API接口 / Add API endpoint for registering controllers
    server.on("/api/version", handleVersionInfo); // 添加获取版本信息的API接口 / Add API endpoint for getting version information
@@ -492,33 +561,123 @@
    Serial.println("OTA功能已启动 / OTA functionality started");
  }
  
- // 主循环 / Main loop
- void loop() {
-   handleMotorButton(); // 处理电机按钮逻辑 / Handle motor button logic
-   handleMotorRunDuration(); // 处理电机运行时长逻辑 / Handle motor run duration logic
-   checkMotorInactivity(); // 检查电机未使用超时 / Check motor inactivity timeout
+// 定义步进电机脉冲信号的最小和最大间隔（微秒） / Define min and max pulse intervals (microseconds)
+const unsigned long minStepPulseInterval = 500;  // 最快速度（2kHz） / Fastest speed (2kHz)
+const unsigned long maxStepPulseInterval = 5000; // 最慢速度（200Hz） / Slowest speed (200Hz)
+unsigned long stepPulseInterval = 1000;          // 当前脉冲间隔（默认1kHz） / Current pulse interval (default 1kHz)
+unsigned long lastStepTime = 0;                  // 上次发送脉冲的时间戳 / Last pulse timestamp
+
+// 调整电机速度 / Adjust motor speed
+void adjustMotorSpeed(bool increase) {
+  if (increase) {
+    // 加速 / Increase speed
+    if (stepPulseInterval > minStepPulseInterval) {
+      stepPulseInterval -= 100; // 减少脉冲间隔 / Decrease pulse interval
+      Serial.printf("电机加速，当前脉冲间隔: %lu 微秒 / Motor speed increased, current pulse interval: %lu us\n", stepPulseInterval, stepPulseInterval);
+    } else {
+      Serial.println("已达到最大速度 / Maximum speed reached");
+    }
+  } else {
+    // 减速 / Decrease speed
+    if (stepPulseInterval < maxStepPulseInterval) {
+      stepPulseInterval += 100; // 增加脉冲间隔 / Increase pulse interval
+      Serial.printf("电机减速，当前脉冲间隔: %lu 微秒 / Motor speed decreased, current pulse interval: %lu us\n", stepPulseInterval, stepPulseInterval);
+    } else {
+      Serial.println("已达到最小速度 / Minimum speed reached");
+    }
+  }
+}
+
+// 更新电机步进脉冲信号 / Update motor step pulse signal
+void updateMotorStepPulse() {
+  if (motorEnabled) {
+    unsigned long currentTime = micros(); // 获取当前时间（微秒） / Get current time in microseconds
+    if (currentTime - lastStepTime >= stepPulseInterval) {
+      lastStepTime = currentTime; // 更新上次脉冲时间戳 / Update last pulse timestamp
+      digitalWrite(STEP_PIN, HIGH); // 设置 STEP 引脚为高电平 / Set STEP pin HIGH
+      delayMicroseconds(stepPulseInterval / 2); // 保持高电平一半周期 / Keep HIGH for half the period
+      digitalWrite(STEP_PIN, LOW); // 设置 STEP 引脚为低电平 / Set STEP pin LOW
+    }
+  }
+}
+
+// 主循环 / Main loop
+void loop() {
+  updateLEDState(); // 更新 LED 状态 / Update LED state
+  handleMotorButton(); // 处理电机按钮逻辑 / Handle motor button logic
+  handleMotorRunDuration(); // 处理电机运行时长逻辑 / Handle motor run duration logic
+  checkMotorInactivity(); // 检查电机未使用超时 / Check motor inactivity timeout
+
+  // 更新电机步进脉冲信号 / Update motor step pulse signal
+  updateMotorStepPulse();
+
+  // 检查物理按钮状态 / Check physical button states
+  handlePhysicalButtons();
+
+  // 检查MQTT连接状态，仅在启用时检测 / Check MQTT connection status only when enabled
+  if (mqttControlEnabled) {
+    if (!client.connected()) {
+      reconnectMQTT(); // 尝试重新连接MQTT / Attempt to reconnect to MQTT
+    }
+    client.loop(); // 处理MQTT消息 / Handle MQTT messages
+  } else {
+    // 如果禁用MQTT控制，确保不会尝试连接或处理消息 / Ensure no connection or message handling when disabled
+    static bool mqttDisabledLogged = false;
+    if (!mqttDisabledLogged) {
+      Serial.println("MQTT控制已禁用，跳过MQTT检测 / MQTT control disabled, skipping MQTT checks");
+      mqttDisabledLogged = true;
+    }
+  }
+
+  server.handleClient(); // 处理网页请求 / Handle web requests
+  ArduinoOTA.handle(); // 处理OTA更新 / Handle OTA updates
+}
+
+// 处理加速请求 / Handle speed up request
+void handleSpeedUp() {
+  adjustMotorSpeed(true); // 加速 / Increase speed
+  server.send(200, "text/plain; charset=utf-8", "电机加速 / Motor speed increased");
+}
+
+// 处理减速请求 / Handle slow down request
+void handleSlowDown() {
+  adjustMotorSpeed(false); // 减速 / Decrease speed
+  server.send(200, "text/plain; charset=utf-8", "电机减速 / Motor speed decreased");
+}
  
-   // 检查物理按钮状态 / Check physical button states
-   handlePhysicalButtons();
- 
-   // 检查MQTT连接状态，仅在启用时检测 / Check MQTT connection status only when enabled
-   if (mqttControlEnabled) {
-     if (!client.connected()) {
-       reconnectMQTT(); // 尝试重新连接MQTT / Attempt to reconnect to MQTT
-     }
-     client.loop(); // 处理MQTT消息 / Handle MQTT messages
-   } else {
-     // 如果禁用MQTT控制，确保不会尝试连接或处理消息 / Ensure no connection or message handling when disabled
-     static bool mqttDisabledLogged = false;
-     if (!mqttDisabledLogged) {
-       Serial.println("MQTT控制已禁用，跳过MQTT检测 / MQTT control disabled, skipping MQTT checks");
-       mqttDisabledLogged = true;
-     }
-   }
- 
-   server.handleClient(); // 处理网页请求 / Handle web requests
-   ArduinoOTA.handle(); // 处理OTA更新 / Handle OTA updates
- }
+// 合并重复的 mqttCallback 函数定义 / Merge duplicate mqttCallback definitions
+void mqttCallback(char* topic, byte* payload, unsigned int length) {
+    if (!mqttControlEnabled) {
+        Serial.printf("[%lu] MQTT控制已禁用，忽略消息 / MQTT control disabled, ignoring message\n", millis());
+        return;
+    }
+    String message;
+    for (unsigned int i = 0; i < length; i++) {
+        message += (char)payload[i];
+    }
+    Serial.printf("收到 MQTT 消息，主题: %s，内容: %s\n", topic, message.c_str());
+
+    // 处理电机控制主题的消息 / Handle motor control topic messages
+    if (String(topic) == mqtt_topic_motor_control) {
+        if (message == "forward") {
+            digitalWrite(DIR_PIN, HIGH); // 设置为正向运动 / Set to forward
+            digitalWrite(ENABLE_PIN, LOW); // 启动电机 / Enable motor
+            Serial.println("电机正向运动（通过 MQTT） / Motor moving forward (via MQTT)");
+        } else if (message == "reverse") {
+            digitalWrite(DIR_PIN, LOW); // 设置为反向运动 / Set to reverse
+            digitalWrite(ENABLE_PIN, LOW); // 启动电机 / Enable motor
+            Serial.println("电机反向运动（通过 MQTT） / Motor moving reverse (via MQTT)");
+        } else if (message == "off") {
+            digitalWrite(ENABLE_PIN, HIGH); // 停止电机 / Disable motor
+            Serial.println("电机停止（通过 MQTT） / Motor stopped (via MQTT)");
+        }
+    }
+
+    // 如果有其他主题需要处理，可以在这里扩展逻辑 / Extend logic here for other topics
+    else {
+        Serial.printf("未处理的 MQTT 主题: %s\n", topic);
+    }
+}
  
  // 处理物理按钮逻辑 / Handle physical button logic
  void handlePhysicalButtons() {
@@ -544,75 +703,55 @@
    }
  }
  
- // 处理电机按钮逻辑 / Handle motor button logic
- void handleMotorButton() {
-   // 读取按钮状态 / Read button state
-   bool currentMotorButtonState = digitalRead(MOTOR_BUTTON_PIN);
- 
-   // 检测按钮状态变化并处理防抖 / Detect button state change and handle debounce
-   if (currentMotorButtonState != lastMotorButtonState) {
-     lastMotorButtonDebounceTime = millis(); // 更新防抖时间戳 / Update debounce timestamp
-   }
- 
-   // 如果按钮状态稳定超过防抖延迟 / If button state is stable beyond debounce delay
-   if ((millis() - lastMotorButtonDebounceTime) > motorButtonDebounceDelay) {
-     // 如果按钮被按下 / If button is pressed
-     if (currentMotorButtonState == LOW) {
-       updateMotorActivity(); // 更新电机活动时间戳 / Update motor activity timestamp
-       if (motorEnabled) {
-         // 如果电机已开启，停止电机 / If motor is enabled, stop the motor
-         motorEnabled = false;
-         digitalWrite(ENABLE_PIN, HIGH); // 禁用电机 / Disable motor
-         Serial.printf("[%lu] 电机已关闭（通过按钮） / Motor disabled (via button)\n", millis());
-       } else {
-         // 如果电机关闭，启动电机 / If motor is disabled, enable the motor
-         motorEnabled = true;
-         motorStartTime = millis(); // 记录启动时间 / Record start time
-         digitalWrite(ENABLE_PIN, LOW); // 启动电机 / Enable motor
-         Serial.printf("[%lu] 电机已开启（通过按钮） / Motor enabled (via button)\n", millis());
-       }
-     }
-   }
- 
-   // 更新按钮状态 / Update button state
-   lastMotorButtonState = currentMotorButtonState;
- 
-   // 如果电机开启且达到限位，停止电机 / Stop motor if enabled and limit is reached
-   if (motorEnabled && currentMotorButtonState == LOW) {
-     motorEnabled = false;
-     digitalWrite(ENABLE_PIN, HIGH); // 禁用电机 / Disable motor
-     Serial.printf("[%lu] 限位触发，电机已停止 / Limit reached, motor stopped\n", getTimestamp());
-   }
- }
- 
- // 处理电机运行时长逻辑 / Handle motor run duration logic
+ // 修改电机按钮逻辑，增加方向引脚判断 / Modify motor button logic to include direction pin check
+void handleMotorButton() {
+    // 读取按钮状态 / Read button state
+    bool currentMotorButtonState = digitalRead(MOTOR_BUTTON_PIN);
+    bool currentDirectionButtonState = digitalRead(BUTTON_DIRECTION_PIN);
+
+    // 检测按钮状态变化并处理防抖 / Detect button state change and handle debounce
+    if (currentMotorButtonState != lastMotorButtonState) {
+        lastMotorButtonDebounceTime = millis(); // 更新防抖时间戳 / Update debounce timestamp
+    }
+
+    // 如果按钮状态稳定超过防抖延迟 / If button state is stable beyond debounce delay
+    if ((millis() - lastMotorButtonDebounceTime) > motorButtonDebounceDelay) {
+        if (currentMotorButtonState == LOW) { // 如果按钮被按下 / If button is pressed
+            updateMotorActivity(); // 更新电机活动时间戳 / Update motor activity timestamp
+            if (motorEnabled) {
+                // 如果电机已开启，检查方向引脚状态 / If motor is enabled, check direction pin state
+                if (currentDirectionButtonState == HIGH) {
+                    motorEnabled = false;
+                    digitalWrite(ENABLE_PIN, HIGH); // 禁用电机 / Disable motor
+                    Serial.printf("[%lu] 电机已关闭（通过按钮） / Motor disabled (via button)\n", millis());
+                } else {
+                    // 限位触发，准备反转运行 / Limit triggered, prepare for reverse
+                    motorDirection = !motorDirection; // 切换电机方向 / Toggle motor direction
+                    digitalWrite(DIR_PIN, motorDirection ? HIGH : LOW); // 设置方向引脚 / Set direction pin
+                    Serial.printf("[%lu] 限位触发，电机方向已切换为: %s / Limit triggered, motor direction toggled to: %s\n",
+                                  millis(), motorDirection ? "正转 / Forward" : "反转 / Reverse",
+                                  motorDirection ? "正转 / Forward" : "反转 / Reverse");
+                }
+            } else {
+                // 如果电机关闭，启动电机 / If motor is disabled, enable the motor
+                motorEnabled = true;
+                motorStartTime = millis(); // 记录启动时间 / Record start time
+                digitalWrite(ENABLE_PIN, LOW); // 启动电机 / Enable motor
+                Serial.printf("[%lu] 电机已开启（通过按钮） / Motor enabled (via button)\n", millis());
+            }
+        }
+    }
+
+    // 更新按钮状态 / Update button state
+    lastMotorButtonState = currentMotorButtonState;
+}
+
+// 处理电机运行时长逻辑 / Handle motor run duration logic
  void handleMotorRunDuration() {
    if (motorEnabled && (millis() - motorStartTime >= motorRunDuration)) {
      motorEnabled = false;
      digitalWrite(ENABLE_PIN, HIGH); // 停止电机 / Disable motor
      Serial.printf("[%lu] 电机运行时间到，已停止 / Motor run duration elapsed, stopped\n", millis());
-   }
- }
- 
- // MQTT消息回调函数 / MQTT message callback function
- void mqttCallback(char* topic, byte* payload, unsigned int length) {
-   if (!mqttControlEnabled) {
-     Serial.printf("[%lu] MQTT控制已禁用，忽略消息 / MQTT control disabled, ignoring message\n", millis());
-     return;
-   }
- 
-   // 将MQTT消息转换为字符串 / Convert MQTT message to string
-   String message;
-   for (unsigned int i = 0; i < length; i++) {
-     message += (char)payload[i];
-   }
-   Serial.printf("[%lu] 收到MQTT消息，主题: %s，内容: %s / Received MQTT message, topic: %s, content: %s\n", millis(), topic, message.c_str(), topic, message.c_str());
- 
-   // 根据主题处理消息 / Handle message based on topic
-   if (String(topic) == mqtt_topic_motor_control) {
-     handleMQTTMotorControl(message);
-   } else {
-     Serial.printf("[%lu] 未知的MQTT主题: %s / Unknown MQTT topic: %s\n", millis(), topic, topic);
    }
  }
  
@@ -814,13 +953,17 @@
          <head>
            <meta charset="UTF-8">
            <script>
-             alert('OTA更新成功，设备即将重启 / OTA update successful, device will restart');
-             window.location.href = '/';
+             alert('OTA更新成功，设备将在5秒后重启 / OTA update successful, device will restart in 5 seconds');
+             setTimeout(() => { window.location.href = '/'; }, 5000);
            </script>
          </head>
-         <body></body>
+         <body>
+           <h1>OTA更新成功 / OTA Update Successful</h1>
+           <p>设备将在5秒后重启 / The device will restart in 5 seconds.</p>
+         </body>
          </html>
        )rawliteral");
+       delay(5000); // 延迟5秒以显示成功信息 / Delay 5 seconds to show success message
        ESP.restart(); // 重启设备 / Restart device
      } else {
        Serial.printf("OTA更新失败，错误代码: %d\n", Update.getError()); // 输出错误代码 / Print error code
@@ -1112,6 +1255,6 @@
    Serial.println("WiFi已断开，设备即将重启 / WiFi disconnected, device will restart");
    ESP.restart(); // 重启设备以进入智能配网模式 / Restart device to enter smart configuration mode
  }
- 
- 
- 
+
+
+
