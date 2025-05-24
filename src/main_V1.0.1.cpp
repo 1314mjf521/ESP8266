@@ -33,6 +33,7 @@
  #include <EEPROM.h> // 引入EEPROM库，用于保存MQTT地址
  #include <ESP8266HTTPClient.h> // 引入HTTPClient库，用于远程OTA升级
  #include <map> // 引入map库，用于存储控制端信息 / Include map library for storing client info
+ #include <BasicStepperDriver.h> // 替换为正确的头文件
  
  
  #define EEPROM_SIZE 512 // 定义EEPROM大小
@@ -69,6 +70,7 @@
  void handleResetWiFi(); // 处理重新配网请求 / Handle reset WiFi request
  void handleSpeedUp(); // 处理加速请求 / Handle speed up request
  void handleSlowDown(); // 处理减速请求 / Handle slow down request
+ void initializeMotorPwm(); // 声明初始化电机PWM信号的函数 / Declare the function to initialize motor PWM signal
  
  // WiFi连接失败计数器 / WiFi connection failure counter
  int wifiConnectFailures = 0;
@@ -182,7 +184,7 @@ const unsigned long debounceDelay = 50; // 防抖延迟（毫秒） / Debounce d
  unsigned long lastMotorActivityTime = 0; // 上次电机操作时间戳 / Last motor activity timestamp
  
  // 定义版本号 / Define version number
- #define FIRMWARE_VERSION "1.0.0"
+ #define FIRMWARE_VERSION "1.0.2"
  
  // 控制端上线标志 / Controller online flag
  bool controllerOnline = false;
@@ -497,10 +499,92 @@ void initializeWiFi() {
    Serial.println("Web服务器已启动 / Web server started");
  }
  
- // 初始化函数 / Initialization function
- void setup() {
-   Serial.begin(115200); // 调试串口 / Debug serial
- 
+// 定义步进电机脉冲信号的最小和最大间隔（微秒） / Define min and max pulse intervals (microseconds)
+const unsigned long minStepPulseInterval = 500;  // 最快速度（2kHz） / Fastest speed (2kHz)
+const unsigned long maxStepPulseInterval = 5000; // 最慢速度（200Hz） / Slowest speed (200Hz)
+unsigned long stepPulseInterval = 1000;          // 当前脉冲间隔（默认1kHz） / Current pulse interval (default 1kHz)
+unsigned long lastStepTime = 0;                  // 上次发送脉冲的时间戳 / Last pulse timestamp
+
+// 步进电机参数
+const int STEPS_PER_REV = 200; // 42步进电机一圈200步（1.8度/步）
+const int MICROSTEPS = 16;     // A4988最大细分16
+const int MOTOR_RPM = 60;      // 默认转速，可根据需要调整
+const int PULSES_PER_REV = STEPS_PER_REV * MICROSTEPS; // 每圈脉冲数（用于转速计算）
+
+// 步进电机速度参数
+unsigned int stepInterval = 200; // 默认脉冲间隔（us），对应5kHz，适合细分
+const unsigned int stepIntervalMin = 50;   // 最快（20kHz）
+const unsigned int stepIntervalMax = 2000; // 最慢（500Hz）
+bool stepDir = true; // true: HIGH, false: LOW
+
+// 步进电机加减速状态
+volatile bool accelerating = false;
+volatile bool decelerating = false;
+
+// 步进电机方向
+// motorDirection 变量已存在，true=HIGH正转，false=LOW反转
+
+// 步进电机运行状态
+// motorEnabled 变量已存在
+
+// 步进脉冲定时
+unsigned long lastStepMicros = 0;
+
+// BasicStepperDriver对象
+BasicStepperDriver stepper(STEPS_PER_REV, DIR_PIN, STEP_PIN, ENABLE_PIN);
+
+// 步进电机单步函数（参考你提供的可运行代码，脉冲宽度35us，直接输出）
+void stepMotorOnce() {
+    digitalWrite(STEP_PIN, HIGH);
+    delayMicroseconds(35);
+    digitalWrite(STEP_PIN, LOW);
+    delayMicroseconds(35);
+}
+
+// 步进电机持续运行函数（使用BasicStepperDriver库）
+void runStepper() {
+    static unsigned long lastStepTime = 0;
+    if (!motorEnabled) {
+        stepper.disable();
+        return;
+    }
+    stepper.enable();
+    unsigned long now = micros();
+    if (now - lastStepTime >= stepInterval) {
+        lastStepTime = now;
+        // 单步控制，方向由 stepDir 决定
+        stepper.move(stepDir ? 1 : -1);
+    }
+}
+
+// 加速/减速接口（直接调整stepInterval，适配BasicStepperDriver库）
+void adjustMotorSpeed(bool increase) {
+    // stepInterval 越小，速度越快
+    if (increase) {
+        if (stepInterval > stepIntervalMin) stepInterval -= 10;
+        if (stepInterval < stepIntervalMin) stepInterval = stepIntervalMin;
+    } else {
+        if (stepInterval < stepIntervalMax) stepInterval += 10;
+        if (stepInterval > stepIntervalMax) stepInterval = stepIntervalMax;
+    }
+    // 计算当前转速（转/秒）
+    float rps = 1000000.0f / (stepInterval * PULSES_PER_REV);
+    Serial.printf("当前脉冲间隔: %u us, 约 %.2f 转/秒\n", stepInterval, rps);
+}
+
+// 初始化函数 / Initialization function
+void setup() {
+    Serial.begin(115200);
+    Serial.println("ESP8266 步进电机控制系统启动");
+    Serial.printf("请确保A4988的MS1/MS2/MS3全部为高电平，已设置为16细分，脉冲/圈=%d\n", PULSES_PER_REV);
+    pinMode(DIR_PIN, OUTPUT);
+    pinMode(STEP_PIN, OUTPUT);
+    pinMode(ENABLE_PIN, OUTPUT);
+    digitalWrite(ENABLE_PIN, HIGH); // 默认关闭电机
+    // ...existing code...
+    stepper.begin(MOTOR_RPM, MICROSTEPS);
+    stepper.setEnableActiveState(LOW); // A4988 EN低电平有效
+    stepper.enable();
    // 打印版本信息 / Print version information
    Serial.println("ESP8266 步进电机远程控制系统 / ESP8266 Stepper Motor Remote Control System");
    Serial.println("固件版本: " FIRMWARE_VERSION " / Firmware Version: " FIRMWARE_VERSION);
@@ -559,48 +643,8 @@ void initializeWiFi() {
    }); // 修复结束符号 / Fix closing brace
    ArduinoOTA.begin();
    Serial.println("OTA功能已启动 / OTA functionality started");
- }
+}
  
-// 定义步进电机脉冲信号的最小和最大间隔（微秒） / Define min and max pulse intervals (microseconds)
-const unsigned long minStepPulseInterval = 500;  // 最快速度（2kHz） / Fastest speed (2kHz)
-const unsigned long maxStepPulseInterval = 5000; // 最慢速度（200Hz） / Slowest speed (200Hz)
-unsigned long stepPulseInterval = 1000;          // 当前脉冲间隔（默认1kHz） / Current pulse interval (default 1kHz)
-unsigned long lastStepTime = 0;                  // 上次发送脉冲的时间戳 / Last pulse timestamp
-
-// 调整电机速度 / Adjust motor speed
-void adjustMotorSpeed(bool increase) {
-  if (increase) {
-    // 加速 / Increase speed
-    if (stepPulseInterval > minStepPulseInterval) {
-      stepPulseInterval -= 100; // 减少脉冲间隔 / Decrease pulse interval
-      Serial.printf("电机加速，当前脉冲间隔: %lu 微秒 / Motor speed increased, current pulse interval: %lu us\n", stepPulseInterval, stepPulseInterval);
-    } else {
-      Serial.println("已达到最大速度 / Maximum speed reached");
-    }
-  } else {
-    // 减速 / Decrease speed
-    if (stepPulseInterval < maxStepPulseInterval) {
-      stepPulseInterval += 100; // 增加脉冲间隔 / Increase pulse interval
-      Serial.printf("电机减速，当前脉冲间隔: %lu 微秒 / Motor speed decreased, current pulse interval: %lu us\n", stepPulseInterval, stepPulseInterval);
-    } else {
-      Serial.println("已达到最小速度 / Minimum speed reached");
-    }
-  }
-}
-
-// 更新电机步进脉冲信号 / Update motor step pulse signal
-void updateMotorStepPulse() {
-  if (motorEnabled) {
-    unsigned long currentTime = micros(); // 获取当前时间（微秒） / Get current time in microseconds
-    if (currentTime - lastStepTime >= stepPulseInterval) {
-      lastStepTime = currentTime; // 更新上次脉冲时间戳 / Update last pulse timestamp
-      digitalWrite(STEP_PIN, HIGH); // 设置 STEP 引脚为高电平 / Set STEP pin HIGH
-      delayMicroseconds(stepPulseInterval / 2); // 保持高电平一半周期 / Keep HIGH for half the period
-      digitalWrite(STEP_PIN, LOW); // 设置 STEP 引脚为低电平 / Set STEP pin LOW
-    }
-  }
-}
-
 // 主循环 / Main loop
 void loop() {
   updateLEDState(); // 更新 LED 状态 / Update LED state
@@ -609,7 +653,7 @@ void loop() {
   checkMotorInactivity(); // 检查电机未使用超时 / Check motor inactivity timeout
 
   // 更新电机步进脉冲信号 / Update motor step pulse signal
-  updateMotorStepPulse();
+  runStepper();
 
   // 检查物理按钮状态 / Check physical button states
   handlePhysicalButtons();
@@ -686,7 +730,8 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
    if (currentDirectionButtonState != lastDirectionButtonState) {
      if (currentDirectionButtonState == LOW) { // 按钮被按下 / Button pressed
        motorDirection = !motorDirection; // 切换电机方向 / Toggle motor direction
-       digitalWrite(DIR_PIN, motorDirection ? HIGH : LOW); // 控制电机方向引脚 / Control motor direction pin
+       stepDir = motorDirection;
+       digitalWrite(DIR_PIN, stepDir ? HIGH : LOW); // 控制电机方向引脚 / Control motor direction pin
        Serial.printf("[%lu] 电机方向已切换为: %s（通过按钮） / Motor direction toggled to: %s (via button)\n", millis(), motorDirection ? "正转 / Forward" : "反转 / Reverse", motorDirection ? "正转 / Forward" : "反转 / Reverse");
      }
      lastDebounceTime = millis(); // 更新防抖时间戳 / Update debounce timestamp
@@ -727,7 +772,8 @@ void handleMotorButton() {
                 } else {
                     // 限位触发，准备反转运行 / Limit triggered, prepare for reverse
                     motorDirection = !motorDirection; // 切换电机方向 / Toggle motor direction
-                    digitalWrite(DIR_PIN, motorDirection ? HIGH : LOW); // 设置方向引脚 / Set direction pin
+                    stepDir = motorDirection;
+                    digitalWrite(DIR_PIN, stepDir ? HIGH : LOW); // 设置方向引脚 / Set direction pin
                     Serial.printf("[%lu] 限位触发，电机方向已切换为: %s / Limit triggered, motor direction toggled to: %s\n",
                                   millis(), motorDirection ? "正转 / Forward" : "反转 / Reverse",
                                   motorDirection ? "正转 / Forward" : "反转 / Reverse");
@@ -771,12 +817,14 @@ void handleMotorButton() {
      Serial.printf("[%lu] 电机已关闭（通过MQTT） / Motor disabled (via MQTT)\n", millis());
    } else if (message == "forward") {
      motorDirection = true;
-     digitalWrite(DIR_PIN, HIGH); // 设置为正转 / Set to forward
+     stepDir = motorDirection;
+     digitalWrite(DIR_PIN, stepDir ? HIGH : LOW); // 设置为正转 / Set to forward
      client.publish(mqtt_topic_status_report, "Motor Forward"); // 上报状态 / Report status
      Serial.printf("[%lu] 电机正转（通过MQTT） / Motor forward (via MQTT)\n", millis());
    } else if (message == "reverse") {
      motorDirection = false;
-     digitalWrite(DIR_PIN, LOW); // 设置为反转 / Set to reverse
+     stepDir = motorDirection;
+     digitalWrite(DIR_PIN, stepDir ? HIGH : LOW); // 设置为反转 / Set to reverse
      client.publish(mqtt_topic_status_report, "Motor Reverse"); // 上报状态 / Report status
      Serial.printf("[%lu] 电机反转（通过MQTT） / Motor reverse (via MQTT)\n", millis());
    } else {
@@ -816,7 +864,8 @@ void handleMotorButton() {
  // 处理Web请求：切换电机方向 / Handle web request: toggle motor direction
  void handleMotorDirection() {
    motorDirection = !motorDirection;
-   digitalWrite(DIR_PIN, motorDirection ? HIGH : LOW); // 设置电机方向 / Set motor direction
+   stepDir = motorDirection;
+   digitalWrite(DIR_PIN, stepDir ? HIGH : LOW); // 设置电机方向 / Set motor direction
    Serial.printf("[%lu] 电机方向已切换为: %s（通过网页） / Motor direction toggled to: %s (via web)\n", millis(), motorDirection ? "正转 / Forward" : "反转 / Reverse", motorDirection ? "正转 / Forward" : "反转 / Reverse");
    server.sendHeader("Content-Type", "text/plain; charset=utf-8");
    server.send(200, "text/plain", motorDirection ? "电机正转 / Motor forward" : "电机反转 / Motor reverse");
@@ -840,12 +889,14 @@ void handleMotorButton() {
        Serial.printf("[%lu] 电机已关闭（通过API） / Motor disabled (via API)\n", getTimestamp());
      } else if (command == "forward") {
        motorDirection = true;
-       digitalWrite(DIR_PIN, HIGH); // 设置为正转 / Set to forward
+       stepDir = motorDirection;
+       digitalWrite(DIR_PIN, stepDir ? HIGH : LOW); // 设置为正转 / Set to forward
        server.send(200, "text/plain", "电机正转 / Motor forward");
        Serial.printf("[%lu] 电机正转（通过API） / Motor forward (via API)\n", getTimestamp());
      } else if (command == "reverse") {
        motorDirection = false;
-       digitalWrite(DIR_PIN, LOW); // 设置为反转 / Set to reverse
+       stepDir = motorDirection;
+       digitalWrite(DIR_PIN, stepDir ? HIGH : LOW); // 设置为反转 / Set to reverse
        server.send(200, "text/plain", "电机反转 / Motor reverse");
        Serial.printf("[%lu] 电机反转（通过API） / Motor reverse (via API)\n", getTimestamp());
      } else {
